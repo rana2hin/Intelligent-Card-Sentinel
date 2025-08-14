@@ -1,4 +1,6 @@
-print("\n--- Layer 3: Billing Anomaly Detector (Random Forest) ---")
+from imblearn.ensemble import BalancedRandomForestClassifier
+
+print("\n--- Layer 3: Billing Anomaly Detector (Balanced Random Forest) ---")
 
 # --- Feature Selection for Layer 3 ---
 # Focus on features relevant to duplicates, subscriptions, merchant billing history
@@ -57,21 +59,18 @@ X_test_l3_processed = preprocessor_l3.transform(X_test_l3)
 print(f"Shape of preprocessed training data for L3 (Billing Error): {X_train_l3_processed.shape}")
 print(f"Shape of preprocessed test data for L3 (Billing Error): {X_test_l3_processed.shape}")
 
-# --- Random Forest Model for Is_Billing_Error ---
+# --- Balanced Random Forest Model for Is_Billing_Error ---
 billing_error_ratio_train = y_train_l3_be.value_counts(normalize=True)
 print(f"Billing Error ratio in L3 training data: \n{billing_error_ratio_train}")
 
-# RandomForest can handle imbalance somewhat with class_weight='balanced'
-rf_l3_be_model = RandomForestClassifier(
-    n_estimators=150,
+rf_l3_be_model = BalancedRandomForestClassifier(
+    n_estimators=200,
     max_depth=10,
     random_state=42,
-    class_weight='balanced', # Good for imbalanced classes
-    n_jobs=-1, # Use all available cores
-    verbose=0
+    n_jobs=-1,
 )
 
-print("\nTraining Layer 3 Random Forest model for Is_Billing_Error...")
+print("\nTraining Layer 3 Balanced Random Forest model for Is_Billing_Error...")
 rf_l3_be_model.fit(X_train_l3_processed, y_train_l3_be)
 print("Layer 3 (Is_Billing_Error) model training complete.")
 
@@ -124,15 +123,13 @@ if not train_df_be_only.empty and 'Billing_Error_Type' in train_df_be_only.colum
     # Preprocess
     X_train_l3_betype_processed = preprocessor_l3.transform(X_train_l3_betype) # Use already fitted preprocessor
 
-    rf_l3_betype_model = RandomForestClassifier(
-        n_estimators=100,
+    rf_l3_betype_model = BalancedRandomForestClassifier(
+        n_estimators=150,
         max_depth=8,
         random_state=42,
-        class_weight='balanced',
         n_jobs=-1,
-        verbose=0
     )
-    print("Training Layer 3 Random Forest model for Billing_Error_Type...")
+    print("Training Layer 3 Balanced Random Forest model for Billing_Error_Type...")
     rf_l3_betype_model.fit(X_train_l3_betype_processed, y_train_l3_betype)
     print("Layer 3 (Billing_Error_Type) model training complete.")
 

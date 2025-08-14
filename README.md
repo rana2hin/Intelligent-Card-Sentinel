@@ -51,7 +51,7 @@ The goal here is to train an autoencoder on normal (non-fraud, non-billing_error
 Next, we'll move to Layer 2 (Fraud Likelihood Estimator). This layer will use supervised learning.
 
 ## Part 3: Layer 2- Fraud Likelihood Estimator.
-This layer takes transactions (potentially all, or those flagged as anomalous by Layer 1, though for a robust system, it's often better to score all for Layer 2) and predicts the probability of them being fraudulent. This is a supervised classification task. We'll use GradientBoostingClassifier as it's generally powerful for tabular data.
+This layer takes transactions (potentially all, or those flagged as anomalous by Layer 1, though for a robust system, it's often better to score all for Layer 2) and predicts the probability of them being fraudulent. This is a supervised classification task. We now rely on an `XGBoost` model with explicit class weighting to better handle the extreme imbalance in fraud labels.
 
 **Explanation of Layer 2 Code:**
 
@@ -65,13 +65,10 @@ This layer takes transactions (potentially all, or those flagged as anomalous by
 3.  **Data Preparation:**
     *   `X_train_l2` and `X_test_l2` are prepared using the selected features.
     *   `y_train_l2` is the `Is_Fraud` column.
-4.  **Gradient Boosting Model (`gbt_l2_model`):**
-    *   `GradientBoostingClassifier` from `sklearn.ensemble` is used.
-    *   Basic hyperparameters like `n_estimators`, `learning_rate`, `max_depth`, and `subsample` are set. These would be tuned in a real project (e.g., using GridSearchCV or RandomizedSearchCV).
-    *   **Class Imbalance:** The code checks the fraud ratio. If it's highly imbalanced, Gradient Boosting might need strategies like:
-        *   Using `sample_weight` in the `.fit()` method if you can calculate appropriate weights.
-        *   Using libraries like `imbalanced-learn` for oversampling (e.g., SMOTE) or undersampling.
-        *   Using a different model more robust to imbalance (like `XGBoost` with `scale_pos_weight`). For this initial pass, we're keeping it simple.
+4.  **XGBoost Model (`xgb_l2_model`):**
+    *   `XGBClassifier` from the `xgboost` library is used.
+    *   Hyperparameters such as `n_estimators`, `learning_rate`, `max_depth`, and `subsample` are configurable and can be tuned via grid or randomized search.
+    *   **Class Imbalance:** The model computes the ratio of negative to positive examples and sets `scale_pos_weight` accordingly so that the rare fraud cases receive proportionally higher weight during training.
 5.  **Training:** The model is trained on the preprocessed training data.
 6.  **Prediction and Evaluation:**
     *   `predict_proba` gives the probability of each class (we take the probability of the positive class, i.e., fraud).
@@ -87,7 +84,7 @@ This layer focuses on identifying non-fraudulent but potentially erroneous or di
 
 For this layer, features related to transaction descriptors, merchant billing history, and comparison with recent transactions become more important. Since our simulated `Transaction_Descriptor_Raw_Text` is not richly populated by Faker for deep NLP, we'll rely more on the structured comparison features and flags we generated. In a real scenario, NLP on detailed descriptors would be key here.
 
-We can use a `RandomForestClassifier` or `LogisticRegression` as they are good general-purpose classifiers. Let's go with RandomForest as it handles categorical features well (after encoding) and can capture non-linearities.
+To better address the imbalance between legitimate transactions and billing errors we employ a `BalancedRandomForestClassifier` from `imbalanced-learn`. This variant of random forest automatically undersamples the majority class in each bootstrap sample, yielding improved recall on rare billing issues.
 
 **Explanation of Layer 3 Code:**
 
@@ -98,9 +95,9 @@ We can use a `RandomForestClassifier` or `LogisticRegression` as they are good g
 3.  **Data Preparation:**
     *   The primary target is `Is_Billing_Error`.
     *   `X_train_l3` and `X_test_l3` are prepared.
-4.  **Random Forest Model for `Is_Billing_Error` (`rf_l3_be_model`):**
-    *   `RandomForestClassifier` is chosen.
-    *   `class_weight='balanced'` is used to help address the imbalance in the `Is_Billing_Error` target.
+4.  **Balanced Random Forest Model for `Is_Billing_Error` (`rf_l3_be_model`):**
+    *   `BalancedRandomForestClassifier` is chosen to intrinsically rebalance each tree's bootstrap sample.
+    *   No manual class weights are required as the ensemble handles class imbalance internally.
 5.  **Training and Evaluation:**
     *   The model is trained to predict whether a transaction is a billing error.
     *   Standard classification metrics (report, ROC AUC, confusion matrix) are used for evaluation.
