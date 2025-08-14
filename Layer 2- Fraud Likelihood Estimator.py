@@ -1,4 +1,6 @@
-print("\n--- Layer 2: Fraud Likelihood Estimator (Gradient Boosting) ---")
+from xgboost import XGBClassifier
+
+print("\n--- Layer 2: Fraud Likelihood Estimator (XGBoost with class weighting) ---")
 
 # --- Feature Selection for Layer 2 ---
 # More comprehensive set of features, including velocity, merchant risk, CNP details
@@ -69,30 +71,32 @@ X_test_l2_processed = preprocessor_l2.transform(X_test_l2)
 print(f"Shape of preprocessed training data for L2: {X_train_l2_processed.shape}")
 print(f"Shape of preprocessed test data for L2: {X_test_l2_processed.shape}")
 
-# --- Gradient Boosting Model Definition & Training ---
-# Handle class imbalance - Gradient Boosting can struggle with highly imbalanced data
-# We can use `scale_pos_weight` (for XGBoost) or class_weight (for scikit-learn's GBT if available, or oversample/undersample)
-# For scikit-learn's GradientBoostingClassifier, there isn't a direct scale_pos_weight.
-# Let's try a simple GBT first, then consider imbalanced-learn or manual weighting if needed.
+# --- XGBoost Model Definition & Training ---
+# Handle class imbalance using scale_pos_weight
 fraud_ratio_train = y_train_l2.value_counts(normalize=True)
 print(f"Fraud ratio in L2 training data: \n{fraud_ratio_train}")
 
-gbt_l2_model = GradientBoostingClassifier(
-    n_estimators=150, # Number of trees
-    learning_rate=0.1,
-    max_depth=5,       # Max depth of individual trees
-    subsample=0.8,     # Fraction of samples used for fitting individual base learners
+neg_pos_ratio = (y_train_l2 == 0).sum() / max((y_train_l2 == 1).sum(), 1)
+
+xgb_l2_model = XGBClassifier(
+    n_estimators=500,
+    learning_rate=0.05,
+    max_depth=6,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    scale_pos_weight=neg_pos_ratio,
+    eval_metric='logloss',
     random_state=42,
-    verbose=0
+    n_jobs=-1,
 )
 
-print("\nTraining Layer 2 Gradient Boosting model for Fraud Detection...")
-gbt_l2_model.fit(X_train_l2_processed, y_train_l2)
+print("\nTraining Layer 2 XGBoost model for Fraud Detection...")
+xgb_l2_model.fit(X_train_l2_processed, y_train_l2)
 print("Layer 2 model training complete.")
 
 # --- Predictions and Evaluation for Layer 2 ---
-y_pred_l2_proba = gbt_l2_model.predict_proba(X_test_l2_processed)[:, 1] # Probability of fraud
-y_pred_l2_class = gbt_l2_model.predict(X_test_l2_processed)           # Class prediction (0 or 1)
+y_pred_l2_proba = xgb_l2_model.predict_proba(X_test_l2_processed)[:, 1] # Probability of fraud
+y_pred_l2_class = xgb_l2_model.predict(X_test_l2_processed)           # Class prediction (0 or 1)
 
 # Add Layer 2 predictions to test_df
 test_df['Layer2_Fraud_Probability'] = y_pred_l2_proba
@@ -141,15 +145,15 @@ plt.ylabel('True Label')
 plt.title('Layer 2 Confusion Matrix - Fraud Detection')
 plt.show()
 
-# --- Feature Importance (from GBT model) ---
-if hasattr(gbt_l2_model, 'feature_importances_'):
+# --- Feature Importance (from XGBoost model) ---
+if hasattr(xgb_l2_model, 'feature_importances_'):
     # Get feature names after one-hot encoding
     try:
         # Get feature names from the preprocessor
         feature_names_l2_processed = list(preprocessor_l2.named_transformers_['num'].get_feature_names_out(layer2_numerical_features)) + \
                                      list(preprocessor_l2.named_transformers_['cat'].get_feature_names_out(layer2_categorical_features))
         
-        importances = gbt_l2_model.feature_importances_
+        importances = xgb_l2_model.feature_importances_
         feature_importance_df_l2 = pd.DataFrame({'feature': feature_names_l2_processed, 'importance': importances})
         feature_importance_df_l2 = feature_importance_df_l2.sort_values(by='importance', ascending=False).head(20)
 
