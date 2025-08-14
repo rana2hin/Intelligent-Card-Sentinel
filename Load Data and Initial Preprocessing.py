@@ -20,7 +20,7 @@ from sklearn.metrics import classification_report, roc_auc_score, roc_curve, pre
 
 # Load the dataset
 try:
-    df = pd.read_csv("/kaggle/input/simulated-credit-card-transactions/simulated_credit_card_transactions.csv")
+    df = pd.read_csv("simulated_credit_card_transactions.csv")
 except FileNotFoundError:
     print("Error: simulated_credit_card_transactions.csv not found. Make sure you've generated it.")
     exit()
