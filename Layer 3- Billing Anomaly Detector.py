@@ -1,162 +1,220 @@
-from imblearn.ensemble import BalancedRandomForestClassifier
+"""Billing anomaly detector leveraging GPU-accelerated XGBoost.
 
-print("\n--- Layer 3: Billing Anomaly Detector (Balanced Random Forest) ---")
+The model predicts whether a transaction is a billing error and,
+optionally, the type of billing error. Hyperparameters are optimised
+with Optuna to maximise the area under the precision–recall curve.
 
-# --- Feature Selection for Layer 3 ---
-# Focus on features relevant to duplicates, subscriptions, merchant billing history
-layer3_numerical_features = [
-    'Transaction_Amount_Local_Currency', 'Is_Card_Present',
-    'Billing_Dispute_History_Count', # CH specific
-    'Historical_Billing_Dispute_Rate_Global', # Merchant specific
-    'Time_Since_CH_Last_Transaction_Overall_Min',
-    'Time_Since_CH_Last_Transaction_at_Same_Merchant_Min', # Key for duplicates
-    'Transaction_Hour',
-    # Include Layer 1's output if deemed useful (and if run on training data too)
-    # For now, keeping it independent like Layer 2
-]
-# Add windowed velocity features for general context
-for window_hr in window_sizes_hours: # Defined in Part 1
-    layer3_numerical_features.append(f'CH_Count_Transactions_Last_{window_hr}H')
-    layer3_numerical_features.append(f'CH_Sum_Amount_Transactions_Last_{window_hr}H')
+This script is intended to run on environments with GPU support such as
+Kaggle notebooks.
+"""
 
+from __future__ import annotations
 
-layer3_categorical_features = [
-    'Merchant_Category_Code', 'Point_of_Sale_Entry_Mode',
-    'Transaction_Country_Code', 'Country_Code_CH',
-    'Persona_Type', 'Merchant_Risk_Level', # General risk might correlate with billing issues
-    'Transaction_DayOfWeek'
-    # 'Transaction_Descriptor_Raw_Text' - if we had more advanced NLP features from it
-    # 'Is_Recurring_Payment_Flag' - if we had simulated this (good feature for real data)
-    # 'Is_First_Recurring_Payment' - if we had simulated this
-]
-
-# Ensure selected features exist
-layer3_numerical_features = [f for f in layer3_numerical_features if f in train_df.columns]
-layer3_categorical_features = [f for f in layer3_categorical_features if f in train_df.columns]
-
-# --- Create Preprocessor for Layer 3 ---
-preprocessor_l3 = ColumnTransformer(
-    transformers=[
-        ('num', numerical_transformer, layer3_numerical_features), # Using StandardScaler
-        ('cat', categorical_transformer, layer3_categorical_features)
-    ],
-    remainder='drop' # Drop other columns not used by this layer
+import numpy as np
+import optuna
+import pandas as pd
+import xgboost as xgb
+from sklearn.metrics import (
+    auc,
+    classification_report,
+    confusion_matrix,
+    precision_recall_curve,
+    roc_auc_score,
 )
 
-# --- Prepare Data for Layer 3 ---
-# Target 1: Is_Billing_Error (Binary)
-features_l3 = layer3_numerical_features + layer3_categorical_features
-X_train_l3 = train_df[features_l3].copy()
-y_train_l3_be = train_df[TARGET_BILLING_ERROR].copy()
-
-X_test_l3 = test_df[features_l3].copy()
-y_test_l3_be_actual = test_df[TARGET_BILLING_ERROR].copy()
-
-# Apply preprocessing
-X_train_l3_processed = preprocessor_l3.fit_transform(X_train_l3)
-X_test_l3_processed = preprocessor_l3.transform(X_test_l3)
-
-print(f"Shape of preprocessed training data for L3 (Billing Error): {X_train_l3_processed.shape}")
-print(f"Shape of preprocessed test data for L3 (Billing Error): {X_test_l3_processed.shape}")
-
-# --- Balanced Random Forest Model for Is_Billing_Error ---
-billing_error_ratio_train = y_train_l3_be.value_counts(normalize=True)
-print(f"Billing Error ratio in L3 training data: \n{billing_error_ratio_train}")
-
-rf_l3_be_model = BalancedRandomForestClassifier(
-    n_estimators=200,
-    max_depth=10,
-    random_state=42,
-    n_jobs=-1,
-)
-
-print("\nTraining Layer 3 Balanced Random Forest model for Is_Billing_Error...")
-rf_l3_be_model.fit(X_train_l3_processed, y_train_l3_be)
-print("Layer 3 (Is_Billing_Error) model training complete.")
-
-# --- Predictions and Evaluation for Is_Billing_Error ---
-y_pred_l3_be_proba = rf_l3_be_model.predict_proba(X_test_l3_processed)[:, 1]
-y_pred_l3_be_class = rf_l3_be_model.predict(X_test_l3_processed)
-
-test_df['Layer3_Billing_Error_Probability'] = y_pred_l3_be_proba
-test_df['Layer3_Billing_Error_Prediction'] = y_pred_l3_be_class
-
-print("\nLayer 3 Is_Billing_Error Performance (on Test Set):")
-print(classification_report(y_test_l3_be_actual, y_pred_l3_be_class, target_names=['Not Billing Error', 'Billing Error']))
-
-try:
-    roc_auc_l3_be = roc_auc_score(y_test_l3_be_actual, y_pred_l3_be_proba)
-    print(f"Layer 3 (Is_Billing_Error) ROC AUC Score: {roc_auc_l3_be:.4f}")
-except ValueError as e:
-    print(f"Could not calculate ROC AUC for Layer 3 (Is_Billing_Error): {e}")
-    roc_auc_l3_be = None
-
-if roc_auc_l3_be is not None:
-    fpr, tpr, _ = roc_curve(y_test_l3_be_actual, y_pred_l3_be_proba)
-    plt.figure(figsize=(8, 6))
-    plt.plot(fpr, tpr, label=f'Layer 3 RF (BE AUC = {roc_auc_l3_be:.2f})')
-    plt.plot([0, 1], [0, 1], 'k--')
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title('Layer 3 ROC Curve - Is_Billing_Error')
-    plt.legend(loc='lower right')
-    plt.show()
-
-# Confusion Matrix for Is_Billing_Error
-cm_l3_be = confusion_matrix(y_test_l3_be_actual, y_pred_l3_be_class)
-plt.figure(figsize=(7, 5))
-sns.heatmap(cm_l3_be, annot=True, fmt='d', cmap='Greens', xticklabels=['Not BE', 'BE'], yticklabels=['Not BE', 'BE'])
-plt.xlabel('Predicted Label')
-plt.ylabel('True Label')
-plt.title('Layer 3 Confusion Matrix - Is_Billing_Error')
-plt.show()
+from data_utils import TARGET_BILLING_ERROR, load_datasets
 
 
-# --- Optional: Model for Billing_Error_Type (Multi-class) ---
-# Only train this on actual billing errors to predict the type
-train_df_be_only = train_df[train_df[TARGET_BILLING_ERROR] == 1].copy()
-if not train_df_be_only.empty and 'Billing_Error_Type' in train_df_be_only.columns and train_df_be_only['Billing_Error_Type'].nunique() > 1:
-    print("\n--- Training Layer 3 Model for Billing_Error_Type ---")
-    X_train_l3_betype = train_df_be_only[features_l3].copy() # Use same features
-    y_train_l3_betype = train_df_be_only['Billing_Error_Type'].copy().fillna('Unknown') # Fill NaNs for target
+def objective(trial: optuna.Trial) -> float:
+    """Optuna objective function for billing error detection."""
 
-    # Preprocess
-    X_train_l3_betype_processed = preprocessor_l3.transform(X_train_l3_betype) # Use already fitted preprocessor
+    data = load_datasets()
+    X_train = data["X_train"]
+    y_train = data["y_train_billing"]
+    X_val = data["X_val"]
+    y_val = data["y_val_billing"]
 
-    rf_l3_betype_model = BalancedRandomForestClassifier(
-        n_estimators=150,
-        max_depth=8,
-        random_state=42,
-        n_jobs=-1,
+    # Compute imbalance ratio for scale_pos_weight
+    neg, pos = np.bincount(y_train)
+    scale_pos_weight = neg / pos if pos > 0 else 1.0
+
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval = xgb.DMatrix(X_val, label=y_val)
+
+    params = {
+        "objective": "binary:logistic",
+        "tree_method": "gpu_hist",
+        "predictor": "gpu_predictor",
+        "eval_metric": "aucpr",
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+        "max_depth": trial.suggest_int("max_depth", 3, 8),
+        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+        "lambda": trial.suggest_float("lambda", 1e-8, 10.0, log=True),
+        "alpha": trial.suggest_float("alpha", 1e-8, 10.0, log=True),
+        "min_child_weight": trial.suggest_float(
+            "min_child_weight", 1e-3, 10.0, log=True
+        ),
+        "scale_pos_weight": scale_pos_weight,
+    }
+
+    num_boost = trial.suggest_int("n_estimators", 200, 1000)
+    model = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=num_boost,
+        evals=[(dval, "val")],
+        early_stopping_rounds=30,
+        verbose_eval=False,
     )
-    print("Training Layer 3 Balanced Random Forest model for Billing_Error_Type...")
-    rf_l3_betype_model.fit(X_train_l3_betype_processed, y_train_l3_betype)
-    print("Layer 3 (Billing_Error_Type) model training complete.")
 
-    # Predict on test set transactions that were *predicted* as billing errors by the first L3 model
-    # Or, for evaluation, predict on all test transactions and then filter by actual billing errors
-    test_df_be_actual_only = test_df[test_df[TARGET_BILLING_ERROR] == 1].copy()
-    if not test_df_be_actual_only.empty :
-        X_test_l3_betype = test_df_be_actual_only[features_l3].copy()
-        y_test_l3_betype_actual = test_df_be_actual_only['Billing_Error_Type'].copy().fillna('Unknown')
+    preds = model.predict(dval)
+    precision, recall, _ = precision_recall_curve(y_val, preds)
+    return auc(recall, precision)
 
-        X_test_l3_betype_processed = preprocessor_l3.transform(X_test_l3_betype)
-        y_pred_l3_betype_class = rf_l3_betype_model.predict(X_test_l3_betype_processed)
 
-        print("\nLayer 3 Billing_Error_Type Performance (on actual Billing Errors in Test Set):")
-        print(classification_report(y_test_l3_betype_actual, y_pred_l3_betype_class))
-        
-        # Add this prediction to the main test_df for those records predicted as Billing Error by the BE model
-        # For simplicity, we'll make a general prediction on all test_df and then use it if Layer3_Billing_Error_Prediction is 1
-        all_X_test_l3_betype_processed = preprocessor_l3.transform(test_df[features_l3]) # Transform all test data
-        all_y_pred_l3_betype_class = rf_l3_betype_model.predict(all_X_test_l3_betype_processed)
-        test_df['Layer3_Predicted_Error_Type'] = all_y_pred_l3_betype_class
-        # Only keep the predicted type if the BE model also flagged it as a billing error
-        test_df.loc[test_df['Layer3_Billing_Error_Prediction'] == 0, 'Layer3_Predicted_Error_Type'] = None
-    else:
-        print("No actual billing errors in test set to evaluate Billing_Error_Type model.")
-        test_df['Layer3_Predicted_Error_Type'] = None # No predictions to make
+def train_final_model(data: dict, best_params: dict):
+    """Train the final billing error model and produce test predictions."""
 
-else:
-    print("Skipping Billing_Error_Type model: not enough data or distinct types in training set.")
-    test_df['Layer3_Predicted_Error_Type'] = None
+    X_train = data["X_train"]
+    X_val = data["X_val"]
+    X_test = data["X_test"]
+    y_train = data["y_train_billing"]
+    y_val = data["y_val_billing"]
+    y_test = data["y_test_billing"]
+
+    test_df = data["test_df"].copy()
+
+    X_full = np.vstack([X_train, X_val])
+    y_full = np.hstack([y_train, y_val])
+
+    neg, pos = np.bincount(y_full)
+    scale_pos_weight = neg / pos if pos > 0 else 1.0
+
+    dtrain = xgb.DMatrix(X_full, label=y_full)
+    dtest = xgb.DMatrix(X_test, label=y_test)
+
+    params = {
+        **best_params,
+        "objective": "binary:logistic",
+        "tree_method": "gpu_hist",
+        "predictor": "gpu_predictor",
+        "eval_metric": "aucpr",
+        "scale_pos_weight": scale_pos_weight,
+    }
+
+    num_boost = params.pop("n_estimators", 500)
+    model = xgb.train(params, dtrain, num_boost_round=num_boost)
+
+    proba = model.predict(dtest)
+    preds = (proba > 0.5).astype(int)
+
+    test_df["Layer3_Billing_Error_Probability"] = proba
+    test_df["Layer3_Billing_Error_Prediction"] = preds
+
+    return test_df, y_test, proba, preds
+
+
+def train_error_type_model(
+    data: dict, best_params: dict, test_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Train a multi-class model to predict the billing error type.
+
+    Only executes if the training data contains more than one distinct
+    ``Billing_Error_Type`` value. Predictions are returned for all test
+    transactions but are masked for records not predicted as billing
+    errors by the binary model.
+    """
+
+    from sklearn.preprocessing import LabelEncoder
+
+    train_df = data["train_df"]
+    val_df = data["val_df"]
+    test_raw = data["test_df"]
+    preprocessor = data["preprocessor"]
+    features = data["features"]
+
+    train_be = train_df[train_df[TARGET_BILLING_ERROR] == 1].copy()
+    val_be = val_df[val_df[TARGET_BILLING_ERROR] == 1].copy()
+
+    if (
+        train_be.empty
+        or "Billing_Error_Type" not in train_be
+        or train_be["Billing_Error_Type"].nunique() < 2
+    ):
+        test_df["Layer3_Predicted_Error_Type"] = None
+        return test_df
+
+    labeler = LabelEncoder()
+    y_train = labeler.fit_transform(train_be["Billing_Error_Type"].astype(str))
+    y_val = labeler.transform(val_be["Billing_Error_Type"].astype(str))
+
+    X_train = preprocessor.transform(train_be[features])
+    X_val = preprocessor.transform(val_be[features])
+
+    num_classes = len(labeler.classes_)
+
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval = xgb.DMatrix(X_val, label=y_val)
+
+    params = {
+        **best_params,
+        "objective": "multi:softprob",
+        "num_class": num_classes,
+        "tree_method": "gpu_hist",
+        "predictor": "gpu_predictor",
+        "eval_metric": "mlogloss",
+    }
+
+    num_boost = params.pop("n_estimators", 500)
+    model = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=num_boost,
+        evals=[(dval, "val")],
+        early_stopping_rounds=30,
+        verbose_eval=False,
+    )
+
+    X_test_all = preprocessor.transform(test_raw[features])
+    dtest_all = xgb.DMatrix(X_test_all)
+    preds = np.asarray(model.predict(dtest_all)).argmax(axis=1)
+    error_types = labeler.inverse_transform(preds)
+
+    test_df["Layer3_Predicted_Error_Type"] = error_types
+    mask_non_error = test_df["Layer3_Billing_Error_Prediction"] == 0
+    test_df.loc[mask_non_error, "Layer3_Predicted_Error_Type"] = None
+
+    return test_df
+
+
+def main() -> None:
+    """Run hyperparameter search and train final models for Layer 3."""
+
+    print("Optimising Layer 3 XGBoost model")
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=20)
+
+    data = load_datasets()
+    test_df, y_test, proba, preds = train_final_model(data, study.best_params)
+
+    print(
+        "Classification report:\n",
+        classification_report(
+            y_test, preds, target_names=["Not Billing Error", "Billing Error"]
+        ),
+    )
+    roc_auc = roc_auc_score(y_test, proba)
+    print(f"ROC AUC: {roc_auc:.4f}")
+    precision, recall, _ = precision_recall_curve(y_test, proba)
+    pr_auc = auc(recall, precision)
+    print(f"PR AUC: {pr_auc:.4f}")
+    print("Confusion matrix:\n", confusion_matrix(y_test, preds))
+
+    # Train optional multi-class model for billing error type
+    train_error_type_model(data, study.best_params, test_df)
+
+
+if __name__ == "__main__":
+    main()
+
