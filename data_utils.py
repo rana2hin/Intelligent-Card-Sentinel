@@ -6,6 +6,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.utils.class_weight import compute_class_weight
 
 # Target column names used across layers
 TARGET_FRAUD = "Is_Fraud"
@@ -22,6 +23,8 @@ def load_datasets(csv_path: str = "simulated_credit_card_transactions.csv"):
         * create a preprocessing pipeline with imputation, scaling and one hot encoding
         * split the data into train/validation/test keeping chronological order
         * fit the preprocessor on the training set and transform all splits
+        * compute class weights for fraud and billing error targets to address
+          class imbalance
 
     Parameters
     ----------
@@ -124,6 +127,18 @@ def load_datasets(csv_path: str = "simulated_credit_card_transactions.csv"):
     X_val = preprocessor.transform(val_df[features])
     X_test = preprocessor.transform(test_df[features])
 
+    # Compute class weights for downstream models to mitigate class imbalance
+    fraud_classes = np.unique(train_df[TARGET_FRAUD])
+    fraud_weights = compute_class_weight(
+        class_weight="balanced", classes=fraud_classes, y=train_df[TARGET_FRAUD]
+    )
+    billing_classes = np.unique(train_df[TARGET_BILLING_ERROR])
+    billing_weights = compute_class_weight(
+        class_weight="balanced",
+        classes=billing_classes,
+        y=train_df[TARGET_BILLING_ERROR],
+    )
+
     return {
         "train_df": train_df,
         "val_df": val_df,
@@ -137,6 +152,8 @@ def load_datasets(csv_path: str = "simulated_credit_card_transactions.csv"):
         "y_train_billing": train_df[TARGET_BILLING_ERROR].values,
         "y_val_billing": val_df[TARGET_BILLING_ERROR].values,
         "y_test_billing": test_df[TARGET_BILLING_ERROR].values,
+        "fraud_class_weights": dict(zip(fraud_classes, fraud_weights)),
+        "billing_class_weights": dict(zip(billing_classes, billing_weights)),
         "preprocessor": preprocessor,
         "features": features,
     }

@@ -126,8 +126,14 @@ def train_final_model(data: dict, best_params: dict):
     best_thr = thr[np.argmax(f1_scores)]
 
     test_tensor = torch.from_numpy(X_test).float().to(DEVICE)
-    recon_test = model(test_tensor)
-    test_mse = torch.mean((test_tensor - recon_test) ** 2, dim=1).cpu().numpy()
+    with torch.no_grad():
+        recon_test = model(test_tensor)
+        test_mse = (
+            torch.mean((test_tensor - recon_test) ** 2, dim=1)
+            .detach()
+            .cpu()
+            .numpy()
+        )
 
     test_df = data["test_df"].copy()
     test_df["Layer1_Reconstruction_Error"] = test_mse
