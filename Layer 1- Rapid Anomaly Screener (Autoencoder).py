@@ -122,7 +122,13 @@ def train_final_model(data: dict, best_params: dict):
         val_mse = torch.mean((val_tensor - recon_val) ** 2, dim=1).cpu().numpy()
 
     precision, recall, thr = precision_recall_curve(y_val, val_mse)
-    f1_scores = np.nan_to_num(2 * precision * recall / (precision + recall))
+    denom = precision[:-1] + recall[:-1]
+    f1_scores = np.divide(
+        2 * precision[:-1] * recall[:-1],
+        denom,
+        out=np.zeros_like(denom),
+        where=denom != 0,
+    )
     best_thr = thr[np.argmax(f1_scores)]
 
     test_tensor = torch.from_numpy(X_test).float().to(DEVICE)
