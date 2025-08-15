@@ -16,7 +16,7 @@ WINDOW_SIZES_HOURS = [1, 6, 24, 168]
 
 
 def load_datasets(
-    csv_path: str = "simulated_credit_card_transactions.csv",
+    csv_path: str = "/kaggle/input/simulated-credit-card-transactions/simulated_credit_card_transactions.csv",
     oversample: bool = True,
 ) -> dict:
     """Load the raw CSV and return processed train/val/test splits.
