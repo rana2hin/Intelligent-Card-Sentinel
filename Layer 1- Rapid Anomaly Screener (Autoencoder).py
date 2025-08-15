@@ -1,163 +1,248 @@
-"""GPU optimised autoencoder for rapid anomaly screening.
-
-The model is trained only on normal transactions (no fraud and no billing errors) and learns to reconstruct them. Transactions with high reconstruction error are flagged as anomalies. Hyperparameters are tuned with Optuna and the implementation uses PyTorch for efficient GPU execution.
-"""
-from __future__ import annotations
-
+# ==============================================================================
+# --- Layer 1: Rapid Anomaly Screener (Autoencoder) - IMPROVED VERSION ---
+# ==============================================================================
+import pandas as pd
 import numpy as np
-import optuna
-import torch
-from sklearn.metrics import auc, precision_recall_curve
-from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import precision_recall_curve, auc
 
-from data_utils import (
-    TARGET_BILLING_ERROR,
-    TARGET_FRAUD,
-    load_datasets,
+import tensorflow as tf
+from tensorflow.keras.models import Model, Sequential
+from tensorflow.keras.layers import Input, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.optimizers import Adam
+
+# Import Optuna for hyperparameter tuning
+try:
+    import optuna
+except ImportError:
+    print("Optuna not found. Please install it: pip install optuna")
+    # If running in a notebook without internet, this will fail.
+    # In that case, you'd have to manually tune parameters.
+    exit()
+
+print("\n--- Layer 1: Rapid Anomaly Screener (Autoencoder) - IMPROVED WORKFLOW ---")
+
+# --- 1. Refined Data Splitting (Train / Validation / Test) ---
+# We already have train_df and test_df from the initial split.
+# Let's create a validation set from the train_df.
+train_df_l1, val_df_l1 = train_test_split(
+    train_df,
+    test_size=0.2, # Use 20% of the original training data as a validation set
+    shuffle=False  # Keep time-based order
 )
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Original Train shape: {train_df.shape}")
+print(f"New L1 Train shape: {train_df_l1.shape}")
+print(f"New L1 Validation shape: {val_df_l1.shape}")
+print(f"Final Test shape: {test_df.shape}")
 
 
-def build_model(trial: optuna.Trial, input_dim: int) -> nn.Module:
-    """Construct an autoencoder based on trial suggestions."""
-    n_layers = trial.suggest_int("n_layers", 1, 3)
-    dropout = trial.suggest_float("dropout", 0.0, 0.5)
-    dims = []
-    last_dim = input_dim
+# --- 2. Feature Selection & Preprocessing Setup ---
+# We'll use the same feature set as before.
+layer1_numerical_features = [
+    'Transaction_Amount_Local_Currency', 'Is_Card_Present',
+    'CH_Avg_Amount', 'CH_Median_Amount', 'CH_StdDev_Amount', 'CH_Transaction_Amount_ZScore',
+    'CH_Frequency_MCC_Usage', 'CH_Count_Transactions_per_Day', 'Transaction_Hour'
+]
+layer1_categorical_features = [
+    'Merchant_Category_Code', 'Point_of_Sale_Entry_Mode', 'Transaction_Currency_Code',
+    'Transaction_Country_Code', 'Persona_Type', 'Transaction_DayOfWeek'
+]
+layer1_numerical_features = [f for f in layer1_numerical_features if f in train_df.columns]
+layer1_categorical_features = [f for f in layer1_categorical_features if f in train_df.columns]
+
+# Create preprocessor with MinMaxScaler, which is better for Autoencoders
+numerical_transformer_minmax = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler', MinMaxScaler())
+])
+categorical_transformer = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='constant', fill_value='Missing')),
+    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+])
+
+preprocessor_l1_minmax = ColumnTransformer(
+    transformers=[
+        ('num', numerical_transformer_minmax, layer1_numerical_features),
+        ('cat', categorical_transformer, layer1_categorical_features)
+    ],
+    remainder='drop'
+)
+
+# Prepare the data splits
+# IMPORTANT: Train the preprocessor ONLY on the training data.
+normal_train_df_l1 = train_df_l1[(train_df_l1[TARGET_FRAUD] == 0) & (train_df_l1[TARGET_BILLING_ERROR] == 0)]
+X_train_normal_scaled = preprocessor_l1_minmax.fit_transform(normal_train_df_l1)
+
+# Transform validation and test sets
+X_val_scaled = preprocessor_l1_minmax.transform(val_df_l1)
+y_val_fraud = val_df_l1[TARGET_FRAUD] # We need the "ground truth" for optimization
+
+X_test_scaled = preprocessor_l1_minmax.transform(test_df)
+y_test_fraud = test_df[TARGET_FRAUD]
+y_test_billing_error = test_df[TARGET_BILLING_ERROR]
+
+input_dim = X_train_normal_scaled.shape[1]
+print(f"Input dimension for Autoencoder: {input_dim}")
+
+
+# --- 3. Hyperparameter Optimization with Optuna ---
+
+def objective(trial):
+    """
+    This function will be called by Optuna to train and evaluate a model.
+    Optuna will try to maximize the return value of this function.
+    """
+    # Suggest hyperparameters to Optuna
+    n_layers = trial.suggest_int('n_layers', 1, 3) # Number of encoder/decoder hidden layers
+    learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
+    dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.5)
+    
+    # Build the model
+    model_layers = [Input(shape=(input_dim,))]
+    
+    # Encoder layers
+    last_layer_neurons = input_dim
     for i in range(n_layers):
-        units = trial.suggest_int(f"n_units_l{i}", 32, 256, log=True)
-        units = min(units, last_dim)
-        dims.append(units)
-        last_dim = units
+        neurons = trial.suggest_int(f'n_units_encoder_l{i}', 32, 256, log=True)
+        # Ensure layers get smaller
+        neurons = min(neurons, last_layer_neurons)
+        model_layers.append(Dense(neurons, activation='relu'))
+        model_layers.append(Dropout(dropout_rate))
+        last_layer_neurons = neurons
 
-    layers = []
-    prev = input_dim
-    for h in dims:
-        layers.extend([nn.Linear(prev, h), nn.ReLU()])
-        if dropout > 0:
-            layers.append(nn.Dropout(dropout))
-        prev = h
-    for h in reversed(dims[:-1]):
-        layers.extend([nn.Linear(prev, h), nn.ReLU()])
-        if dropout > 0:
-            layers.append(nn.Dropout(dropout))
-        prev = h
-    layers.append(nn.Linear(prev, input_dim))
-    return nn.Sequential(*layers).to(DEVICE)
+    # Decoder layers (mirrors the encoder)
+    for i in range(n_layers - 1, -1, -1):
+        neurons = model_layers[i * 2 + 1].units # Get neuron count from corresponding encoder layer
+        model_layers.append(Dense(neurons, activation='relu'))
+        model_layers.append(Dropout(dropout_rate))
 
-
-def objective(trial: optuna.Trial) -> float:
-    data = load_datasets()
-    X_train = data["X_train"]
-    X_val = data["X_val"]
-    y_val = data["y_val_fraud"]
-
-    normal_idx = np.where(
-        (data["y_train_fraud"] == 0) & (data["y_train_billing"] == 0)
-    )[0]
-    X_train_norm = X_train[normal_idx]
-
-    train_ds = TensorDataset(torch.from_numpy(X_train_norm).float())
-    train_loader = DataLoader(train_ds, batch_size=256, shuffle=True)
-
-    model = build_model(trial, X_train.shape[1])
-    lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.MSELoss()
-
-    model.train()
-    for epoch in range(40):
-        for (batch,) in train_loader:
-            batch = batch.to(DEVICE)
-            optimizer.zero_grad()
-            recon = model(batch)
-            loss = loss_fn(recon, batch)
-            loss.backward()
-            optimizer.step()
-
-    model.eval()
-    with torch.no_grad():
-        val_tensor = torch.from_numpy(X_val).float().to(DEVICE)
-        recon = model(val_tensor)
-        mse = torch.mean((val_tensor - recon) ** 2, dim=1).cpu().numpy()
-    precision, recall, _ = precision_recall_curve(y_val, mse)
-    return auc(recall, precision)
-
-
-def train_final_model(data: dict, best_params: dict):
-    X_train = data["X_train"]
-    X_val = data["X_val"]
-    X_test = data["X_test"]
-    y_val = data["y_val_fraud"]
-    y_test_fraud = data["y_test_fraud"]
-    y_test_billing = data["y_test_billing"]
-
-    normal_idx = np.where(
-        (data["y_train_fraud"] == 0) & (data["y_train_billing"] == 0)
-    )[0]
-    X_train_norm = X_train[normal_idx]
-
-    model = build_model(optuna.trial.FixedTrial(best_params), X_train.shape[1])
-    optimizer = torch.optim.Adam(model.parameters(), lr=best_params["lr"])
-    loss_fn = nn.MSELoss()
-    train_ds = TensorDataset(torch.from_numpy(X_train_norm).float())
-    train_loader = DataLoader(train_ds, batch_size=256, shuffle=True)
-
-    model.train()
-    for epoch in range(100):
-        for (batch,) in train_loader:
-            batch = batch.to(DEVICE)
-            optimizer.zero_grad()
-            recon = model(batch)
-            loss = loss_fn(recon, batch)
-            loss.backward()
-            optimizer.step()
-
-    model.eval()
-    with torch.no_grad():
-        val_tensor = torch.from_numpy(X_val).float().to(DEVICE)
-        recon_val = model(val_tensor)
-        val_mse = torch.mean((val_tensor - recon_val) ** 2, dim=1).cpu().numpy()
-
-    precision, recall, thr = precision_recall_curve(y_val, val_mse)
-    denom = precision[:-1] + recall[:-1]
-    f1_scores = np.divide(
-        2 * precision[:-1] * recall[:-1],
-        denom,
-        out=np.zeros_like(denom),
-        where=denom != 0,
+    model_layers.append(Dense(input_dim, activation='sigmoid'))
+    
+    model = Sequential(model_layers)
+    model.compile(optimizer=Adam(learning_rate=learning_rate), loss='mse')
+    
+    # Train the model
+    early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+    model.fit(
+        X_train_normal_scaled, X_train_normal_scaled,
+        epochs=50, # Shorter epochs for faster tuning
+        batch_size=256,
+        shuffle=True,
+        validation_split=0.1, # Inner validation split for training stability
+        callbacks=[early_stopping],
+        verbose=0 # Suppress output during tuning
     )
-    best_thr = thr[np.argmax(f1_scores)]
+    
+    # Evaluate on our dedicated validation set
+    X_val_pred = model.predict(X_val_scaled, verbose=0)
+    val_mse = np.mean(np.power(X_val_scaled - X_val_pred, 2), axis=1)
+    
+    # Calculate PR-AUC, our optimization metric
+    precision, recall, _ = precision_recall_curve(y_val_fraud, val_mse)
+    pr_auc_score = auc(recall, precision)
+    
+    return pr_auc_score
 
-    test_tensor = torch.from_numpy(X_test).float().to(DEVICE)
-    with torch.no_grad():
-        recon_test = model(test_tensor)
-        test_mse = (
-            torch.mean((test_tensor - recon_test) ** 2, dim=1)
-            .detach()
-            .cpu()
-            .numpy()
-        )
+# Create and run the Optuna study
+print("\nStarting Hyperparameter Optimization with Optuna...")
+study = optuna.create_study(direction='maximize')
+study.optimize(objective, n_trials=20) # Run 20 different trials to find the best params
 
-    test_df = data["test_df"].copy()
-    test_df["Layer1_Reconstruction_Error"] = test_mse
-    test_df["Layer1_Is_Anomaly_Flag"] = (test_mse > best_thr).astype(int)
+print("\nOptimization finished.")
+print("Best trial PR-AUC:", study.best_value)
+print("Best hyperparameters found:", study.best_params)
 
-    return test_df, best_thr
+# --- 4. Build, Train, and Evaluate the Best Model ---
+
+# Get the best parameters from the study
+best_params = study.best_params
+best_n_layers = best_params['n_layers']
+best_learning_rate = best_params['learning_rate']
+best_dropout_rate = best_params['dropout_rate']
+
+# Build the final model architecture with the best params
+final_model_layers = [Input(shape=(input_dim,))]
+last_layer_neurons = input_dim
+for i in range(best_n_layers):
+    neurons = best_params[f'n_units_encoder_l{i}']
+    final_model_layers.append(Dense(neurons, activation='relu'))
+    final_model_layers.append(Dropout(best_dropout_rate))
+    last_layer_neurons = neurons
+
+for i in range(best_n_layers - 1, -1, -1):
+    neurons = final_model_layers[i * 2 + 1].units
+    final_model_layers.append(Dense(neurons, activation='relu'))
+    final_model_layers.append(Dropout(best_dropout_rate))
+
+final_model_layers.append(Dense(input_dim, activation='sigmoid'))
+
+final_autoencoder = Sequential(final_model_layers)
+final_autoencoder.compile(optimizer=Adam(learning_rate=best_learning_rate), loss='mse')
+final_autoencoder.summary()
+
+# Train the final model on ALL normal training data (no validation split needed here)
+print("\nTraining final best model on all normal training data...")
+final_autoencoder.fit(
+    X_train_normal_scaled, X_train_normal_scaled,
+    epochs=100, # Train for longer now that we have the best params
+    batch_size=256,
+    shuffle=True,
+    callbacks=[EarlyStopping(monitor='loss', patience=10)], # Monitor training loss directly
+    verbose=1
+)
+
+# --- 5. Find Optimal Threshold on Validation Set ---
+X_val_pred_final = final_autoencoder.predict(X_val_scaled)
+val_mse_final = np.mean(np.power(X_val_scaled - X_val_pred_final, 2), axis=1)
+
+precision, recall, thresholds = precision_recall_curve(y_val_fraud, val_mse_final)
+f1_scores = np.nan_to_num(2 * (precision * recall) / (precision + recall))
+
+best_threshold_idx = np.argmax(f1_scores)
+OPTIMIZED_THRESHOLD = thresholds[best_threshold_idx]
+print(f"\nOptimal Anomaly Threshold (found on validation set): {OPTIMIZED_THRESHOLD:.6f}")
 
 
-def main() -> None:
-    print("Running Layer 1 autoencoder on", DEVICE)
-    study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=20)
-    print("Best trial:", study.best_value)
-    data = load_datasets()
-    test_df, threshold = train_final_model(data, study.best_params)
-    print(f"Optimal reconstruction threshold: {threshold:.6f}")
-    print(test_df[["Layer1_Reconstruction_Error", "Layer1_Is_Anomaly_Flag"]].head())
+# --- 6. Final Evaluation on the Unseen Test Set ---
+print("\n--- Final Performance Evaluation on Test Set ---")
+X_test_pred = final_autoencoder.predict(X_test_scaled)
+test_mse = np.mean(np.power(X_test_scaled - X_test_pred, 2), axis=1)
 
+# Add results to the main test_df for analysis and use by Layer 4
+test_df['Layer1_Reconstruction_Error'] = test_mse
+test_df['Layer1_Is_Anomaly_Flag'] = (test_df['Layer1_Reconstruction_Error'] > OPTIMIZED_THRESHOLD).astype(int)
 
-if __name__ == "__main__":
-    main()
+# Plot final distributions
+plt.figure(figsize=(10, 6))
+sns.histplot(data=test_df, x='Layer1_Reconstruction_Error', hue=TARGET_FRAUD, bins=50, kde=True)
+plt.title('Final Distribution of Reconstruction Errors on Test Set')
+plt.axvline(OPTIMIZED_THRESHOLD, color='r', linestyle='--', label=f'Optimal Threshold ({OPTIMIZED_THRESHOLD:.4f})')
+plt.legend()
+plt.show()
+
+# Boxplots
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+sns.boxplot(x=test_df[TARGET_FRAUD], y=test_df['Layer1_Reconstruction_Error'])
+plt.title('Reconstruction Error vs Actual Fraud')
+
+plt.subplot(1, 2, 2)
+sns.boxplot(x=test_df[TARGET_BILLING_ERROR], y=test_df['Layer1_Reconstruction_Error'])
+plt.title('Reconstruction Error vs Actual Billing Error')
+plt.tight_layout()
+plt.show()
+
+# Final flagging report on test set
+print("\nFinal Layer 1 Anomaly Flagging Report (on Test Set):")
+print("Comparison with Actual Fraud:")
+print(pd.crosstab(test_df['Layer1_Is_Anomaly_Flag'], y_test_fraud))
+print("\nComparison with Actual Billing Errors:")
+print(pd.crosstab(test_df['Layer1_Is_Anomaly_Flag'], y_test_billing_error))
