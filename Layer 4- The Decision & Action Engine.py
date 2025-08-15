@@ -1,109 +1,122 @@
-"""Decision and action engine combining layer outputs with a meta learner."""
-from __future__ import annotations
+print("\n--- Layer 4: Decision & Action Engine (Meta-Learner Conception) ---")
 
-import numpy as np
-import torch
-from sklearn.metrics import classification_report, roc_auc_score
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+# For this demonstration, we'll split our current test_df further
+# to get a "meta_train_df" (for training the meta-learner) and a "meta_test_df" (for evaluating it)
+# This simulates having a validation set with predictaions from L1, L2, L3.
 
-from data_utils import TARGET_BILLING_ERROR, TARGET_FRAUD, load_datasets
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def build_meta_dataset(df):
-    features = [
-        "Layer1_Reconstruction_Error",
-        "Layer2_Fraud_Probability",
-        "Layer3_Billing_Error_Probability",
-        "Transaction_Amount_Local_Currency",
-    ]
-    for f in features:
-        if f not in df.columns:
-            df[f] = 0.0
-    X = df[features].astype(float).values
-    y = ((df[TARGET_FRAUD] == 1) | (df[TARGET_BILLING_ERROR] == 1)).astype(int).values
-    scaler = StandardScaler()
-    X = scaler.fit_transform(X)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.5, shuffle=False
-    )
-    train_ds = TensorDataset(
-        torch.from_numpy(X_train).float(), torch.from_numpy(y_train).float()
-    )
-    test_ds = TensorDataset(
-        torch.from_numpy(X_test).float(), torch.from_numpy(y_test).float()
-    )
-    return train_ds, test_ds, scaler
+if 'Layer1_Reconstruction_Error' not in test_df.columns or \
+   'Layer2_Fraud_Probability' not in test_df.columns or \
+   'Layer3_Billing_Error_Probability' not in test_df.columns:
+    print("Error: Outputs from Layers 1, 2, or 3 are missing in test_df. Cannot proceed with Layer 4.")
+    # In a real pipeline, ensure these are populated.
+    # For now, if they are missing, we'll create dummy columns for the code to run.
+    if 'Layer1_Reconstruction_Error' not in test_df.columns: test_df['Layer1_Reconstruction_Error'] = np.random.rand(len(test_df))
+    if 'Layer2_Fraud_Probability' not in test_df.columns: test_df['Layer2_Fraud_Probability'] = np.random.rand(len(test_df))
+    if 'Layer3_Billing_Error_Probability' not in test_df.columns: test_df['Layer3_Billing_Error_Probability'] = np.random.rand(len(test_df))
+    print("Dummy L1/L2/L3 outputs created in test_df for Layer 4 demonstration.")
 
 
-class MetaNet(nn.Module):
-    def __init__(self, input_dim: int):
-        super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(input_dim, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1),
-        )
+meta_split_point = int(len(test_df) * 0.5) # Use 50% of test_df for meta-training
+meta_train_df = test_df.iloc[:meta_split_point].copy()
+meta_test_df = test_df.iloc[meta_split_point:].copy()
 
-    def forward(self, x):
-        return self.layers(x).squeeze(-1)
+print(f"Meta-Train set shape: {meta_train_df.shape}")
+print(f"Meta-Test set shape: {meta_test_df.shape}")
 
-
-def train_model(train_ds: TensorDataset, test_ds: TensorDataset):
-    model = MetaNet(train_ds.tensors[0].shape[1]).to(DEVICE)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    loss_fn = nn.BCEWithLogitsLoss()
-    loader = DataLoader(train_ds, batch_size=64, shuffle=True)
-    for epoch in range(50):
-        for xb, yb in loader:
-            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-            opt.zero_grad()
-            loss = loss_fn(model(xb), yb)
-            loss.backward()
-            opt.step()
-    model.eval()
-    xb, yb = test_ds.tensors
-    xb, yb = xb.to(DEVICE), yb.to(DEVICE)
-    with torch.no_grad():
-        probs = torch.sigmoid(model(xb)).cpu().numpy()
-    y_true = yb.cpu().numpy()
-    preds = (probs > 0.5).astype(int)
-    report = classification_report(y_true, preds, output_dict=False)
-    try:
-        auc_score = roc_auc_score(y_true, probs)
-    except ValueError:
-        auc_score = float("nan")
-    return model, probs, preds, y_true, report, auc_score
+# --- Define Features and Target for Meta-Learner ---
+meta_features = [
+    'Layer1_Reconstruction_Error',
+    'Layer2_Fraud_Probability',
+    'Layer3_Billing_Error_Probability',
+    'Transaction_Amount_Local_Currency' # Example: include original transaction amount
+]
+# Ensure features exist
+meta_features = [f for f in meta_features if f in meta_train_df.columns]
 
 
-def main() -> None:
-    data = load_datasets()
-    df = data["test_df"].copy()
-    train_ds, test_ds, _ = build_meta_dataset(df)
-    model, probs, preds, y_true, report, auc_score = train_model(train_ds, test_ds)
-    print("Layer 4 meta-learner performance:\n", report)
-    print(f"ROC AUC: {auc_score:.4f}")
+# Define a simplified combined target: "High_Risk_Event"
+# 1 if it's fraud OR a significant billing error (e.g., probability > 0.5 from L3)
+# This is a simplification for demonstration.
+meta_train_df['Meta_Target_High_Risk'] = (
+    (meta_train_df[TARGET_FRAUD] == 1) |
+    (meta_train_df[TARGET_BILLING_ERROR] == 1) # Simplified: any billing error is high risk for this target
+).astype(int)
 
-    meta_df = df.iloc[len(train_ds) :].copy().reset_index(drop=True)
-    meta_df["Layer4_Final_Risk_Probability"] = probs
-    meta_df["Layer4_Final_Risk_Prediction"] = preds
-    meta_df["Suggested_Action"] = "Approve"
-    meta_df.loc[probs > 0.4, "Suggested_Action"] = "Flag_For_Review"
-    meta_df.loc[probs > 0.7, "Suggested_Action"] = "Decline_Or_StepUp"
-    print(meta_df[[
-        "Layer1_Reconstruction_Error",
-        "Layer2_Fraud_Probability",
-        "Layer3_Billing_Error_Probability",
-        TARGET_FRAUD,
-        TARGET_BILLING_ERROR,
-        "Layer4_Final_Risk_Probability",
-        "Suggested_Action",
-    ]].head(20))
+meta_test_df['Meta_Target_High_Risk'] = (
+    (meta_test_df[TARGET_FRAUD] == 1) |
+    (meta_test_df[TARGET_BILLING_ERROR] == 1)
+).astype(int)
 
+X_meta_train = meta_train_df[meta_features].copy()
+y_meta_train = meta_train_df['Meta_Target_High_Risk'].copy()
 
-if __name__ == "__main__":
-    main()
+X_meta_test = meta_test_df[meta_features].copy()
+y_meta_test_actual = meta_test_df['Meta_Target_High_Risk'].copy()
+
+# --- Preprocessing for Meta-Learner (usually just scaling) ---
+# Impute NaNs that might arise from layer predictions (though ideally they shouldn't)
+meta_preprocessor = Pipeline(steps=[
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler', StandardScaler())
+])
+
+X_meta_train_processed = meta_preprocessor.fit_transform(X_meta_train)
+X_meta_test_processed = meta_preprocessor.transform(X_meta_test)
+
+print(f"Shape of preprocessed meta-training data: {X_meta_train_processed.shape}")
+
+# --- Meta-Learner Model (Logistic Regression) ---
+meta_learner = LogisticRegression(solver='liblinear', random_state=42, class_weight='balanced')
+
+print("\nTraining Layer 4 Meta-Learner...")
+meta_learner.fit(X_meta_train_processed, y_meta_train)
+print("Layer 4 Meta-Learner training complete.")
+
+# --- Predictions and Evaluation for Meta-Learner ---
+y_pred_meta_proba = meta_learner.predict_proba(X_meta_test_processed)[:, 1]
+y_pred_meta_class = meta_learner.predict(X_meta_test_processed)
+
+meta_test_df['Layer4_Final_Risk_Probability'] = y_pred_meta_proba
+meta_test_df['Layer4_Final_Risk_Prediction'] = y_pred_meta_class
+
+print("\nLayer 4 Meta-Learner Performance (on Meta-Test Set for 'High_Risk_Event'):")
+print(classification_report(y_meta_test_actual, y_pred_meta_class, target_names=['Not High Risk', 'High Risk']))
+
+try:
+    roc_auc_meta = roc_auc_score(y_meta_test_actual, y_pred_meta_proba)
+    print(f"Layer 4 Meta-Learner ROC AUC Score: {roc_auc_meta:.4f}")
+except ValueError as e:
+    print(f"Could not calculate ROC AUC for Layer 4: {e}")
+    roc_auc_meta = None
+    
+# --- Example of how to use the meta-learner's output for actions ---
+# This is where you'd define thresholds for actions
+final_decision_threshold_high_risk = 0.7 # Example: if prob > 0.7, take strong action
+final_decision_threshold_medium_risk = 0.4 # Example: if prob > 0.4, flag for review
+
+meta_test_df['Suggested_Action'] = 'Approve'
+meta_test_df.loc[meta_test_df['Layer4_Final_Risk_Probability'] > final_decision_threshold_medium_risk, 'Suggested_Action'] = 'Flag_For_Review'
+meta_test_df.loc[meta_test_df['Layer4_Final_Risk_Probability'] > final_decision_threshold_high_risk, 'Suggested_Action'] = 'Decline_Or_StepUp'
+
+print("\nExample Suggested Actions based on Layer 4 Meta-Learner Output:")
+print(meta_test_df[['Layer1_Reconstruction_Error', 'Layer2_Fraud_Probability', 'Layer3_Billing_Error_Probability',
+                    TARGET_FRAUD, TARGET_BILLING_ERROR, # Actuals
+                    'Layer4_Final_Risk_Probability', 'Suggested_Action']].head(20))
+
+print("\nDistribution of Suggested Actions:")
+print(meta_test_df['Suggested_Action'].value_counts())
+
+import matplotlib.pyplot as plt
+
+# Calculate counts directly from the DataFrame column
+counts = meta_test_df['Suggested_Action'].value_counts()
+
+# Plot the bar chart
+plt.figure(figsize=(8, 6))
+counts.plot(kind='bar')
+plt.title("Distribution of Suggested Actions")
+plt.xlabel("Suggested Action")
+plt.ylabel("Count")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
