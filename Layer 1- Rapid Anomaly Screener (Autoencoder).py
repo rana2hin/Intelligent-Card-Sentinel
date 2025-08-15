@@ -10,7 +10,17 @@ from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import precision_recall_curve, auc
+from sklearn.metrics import (
+    precision_recall_curve,
+    auc,
+    classification_report,
+    confusion_matrix,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+)
+from data_utils import TARGET_BILLING_ERROR, TARGET_FRAUD, load_datasets
 
 import tensorflow as tf
 from tensorflow.keras.models import Model, Sequential
@@ -29,13 +39,17 @@ except ImportError:
 
 print("\n--- Layer 1: Rapid Anomaly Screener (Autoencoder) - IMPROVED WORKFLOW ---")
 
-# --- 1. Refined Data Splitting (Train / Validation / Test) ---
-# We already have train_df and test_df from the initial split.
-# Let's create a validation set from the train_df.
+# Load data
+data = load_datasets(oversample=False)
+train_df = data["train_df"]
+val_df = data["val_df"]
+test_df = data["test_df"]
+
+# Further split training data for validation specific to Layer 1
 train_df_l1, val_df_l1 = train_test_split(
     train_df,
-    test_size=0.2, # Use 20% of the original training data as a validation set
-    shuffle=False  # Keep time-based order
+    test_size=0.2,
+    shuffle=False,
 )
 
 print(f"Original Train shape: {train_df.shape}")
@@ -246,3 +260,17 @@ print("Comparison with Actual Fraud:")
 print(pd.crosstab(test_df['Layer1_Is_Anomaly_Flag'], y_test_fraud))
 print("\nComparison with Actual Billing Errors:")
 print(pd.crosstab(test_df['Layer1_Is_Anomaly_Flag'], y_test_billing_error))
+
+# Standard classification metrics treating fraud as the positive class
+y_pred = test_df['Layer1_Is_Anomaly_Flag'].values
+print("\nClassification metrics vs Fraud labels:")
+print(classification_report(y_test_fraud, y_pred, target_names=['Legit', 'Fraud']))
+
+cm = confusion_matrix(y_test_fraud, y_pred)
+plt.figure(figsize=(6, 4))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Reds', xticklabels=['Legit', 'Fraud'], yticklabels=['Legit', 'Fraud'])
+plt.xlabel('Predicted')
+plt.ylabel('Actual')
+plt.title('Layer 1 Confusion Matrix')
+plt.tight_layout()
+plt.show()
