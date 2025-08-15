@@ -35,6 +35,15 @@ def main() -> None:
     print("Targets available:")
     print(train_df[[TARGET_FRAUD, TARGET_BILLING_ERROR]].head())
 
+    # Show class imbalance information
+    print("\nTraining target distribution before oversampling:")
+    print(train_df[TARGET_FRAUD].value_counts())
+    print(train_df[TARGET_BILLING_ERROR].value_counts())
+
+    print("\nResampled training set sizes:")
+    print("Fraud target:", data["y_train_fraud"].shape[0])
+    print("Billing error target:", data["y_train_billing"].shape[0])
+
 
 if __name__ == "__main__":
     main()

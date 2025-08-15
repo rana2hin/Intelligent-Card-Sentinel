@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
+from imblearn.over_sampling import RandomOverSampler
 
 # Target column names used across layers
 TARGET_FRAUD = "Is_Fraud"
@@ -14,7 +15,10 @@ TARGET_BILLING_ERROR = "Is_Billing_Error"
 WINDOW_SIZES_HOURS = [1, 6, 24, 168]
 
 
-def load_datasets(csv_path: str = "simulated_credit_card_transactions.csv"):
+def load_datasets(
+    csv_path: str = "simulated_credit_card_transactions.csv",
+    oversample: bool = True,
+) -> dict:
     """Load the raw CSV and return processed train/val/test splits.
 
     The function performs the following steps:
@@ -25,6 +29,8 @@ def load_datasets(csv_path: str = "simulated_credit_card_transactions.csv"):
         * fit the preprocessor on the training set and transform all splits
         * compute class weights for fraud and billing error targets to address
           class imbalance
+        * optionally oversample the training split so downstream models see a
+          more balanced class distribution (improves recall for rare events)
 
     Parameters
     ----------
@@ -127,31 +133,52 @@ def load_datasets(csv_path: str = "simulated_credit_card_transactions.csv"):
     X_val = preprocessor.transform(val_df[features])
     X_test = preprocessor.transform(test_df[features])
 
+    y_train_fraud = train_df[TARGET_FRAUD].values
+    y_val_fraud = val_df[TARGET_FRAUD].values
+    y_test_fraud = test_df[TARGET_FRAUD].values
+
+    y_train_billing = train_df[TARGET_BILLING_ERROR].values
+    y_val_billing = val_df[TARGET_BILLING_ERROR].values
+    y_test_billing = test_df[TARGET_BILLING_ERROR].values
+
+    # Optionally oversample the minority class on the training set.  We keep
+    # separate resampled matrices for the fraud and billing error targets so
+    # that each downstream model can train on a balanced dataset tailored to
+    # its objective.
+    if oversample:
+        ros = RandomOverSampler(random_state=42)
+        X_train_fraud, y_train_fraud = ros.fit_resample(X_train, y_train_fraud)
+        X_train_billing, y_train_billing = ros.fit_resample(X_train, y_train_billing)
+    else:
+        X_train_fraud, y_train_fraud = X_train, y_train_fraud
+        X_train_billing, y_train_billing = X_train, y_train_billing
+
     # Compute class weights for downstream models to mitigate class imbalance
-    fraud_classes = np.unique(train_df[TARGET_FRAUD])
+    fraud_classes = np.unique(y_train_fraud)
     fraud_weights = compute_class_weight(
-        class_weight="balanced", classes=fraud_classes, y=train_df[TARGET_FRAUD]
+        class_weight="balanced", classes=fraud_classes, y=y_train_fraud
     )
-    billing_classes = np.unique(train_df[TARGET_BILLING_ERROR])
+    billing_classes = np.unique(y_train_billing)
     billing_weights = compute_class_weight(
         class_weight="balanced",
         classes=billing_classes,
-        y=train_df[TARGET_BILLING_ERROR],
+        y=y_train_billing,
     )
 
     return {
         "train_df": train_df,
         "val_df": val_df,
         "test_df": test_df,
-        "X_train": X_train,
+        "X_train_fraud": X_train_fraud,
+        "X_train_billing": X_train_billing,
         "X_val": X_val,
         "X_test": X_test,
-        "y_train_fraud": train_df[TARGET_FRAUD].values,
-        "y_val_fraud": val_df[TARGET_FRAUD].values,
-        "y_test_fraud": test_df[TARGET_FRAUD].values,
-        "y_train_billing": train_df[TARGET_BILLING_ERROR].values,
-        "y_val_billing": val_df[TARGET_BILLING_ERROR].values,
-        "y_test_billing": test_df[TARGET_BILLING_ERROR].values,
+        "y_train_fraud": y_train_fraud,
+        "y_val_fraud": y_val_fraud,
+        "y_test_fraud": y_test_fraud,
+        "y_train_billing": y_train_billing,
+        "y_val_billing": y_val_billing,
+        "y_test_billing": y_test_billing,
         "fraud_class_weights": dict(zip(fraud_classes, fraud_weights)),
         "billing_class_weights": dict(zip(billing_classes, billing_weights)),
         "preprocessor": preprocessor,
